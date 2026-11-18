@@ -25,20 +25,23 @@
 
 **Android PacketMinePm Panel** lets you run **PocketMine-MP** locally on an Android device and host a **Minecraft Bedrock** server without a separate computer.
 
+## 📥 Releases — Start here
+
+Visit the [Releases page](https://github.com/EXBYPIXEL/Android-PacketMinePm-Panel/releases) to download an available version of the app. Install its APK on your Android device, then use the panel to choose a server version and get started. If no release is available yet, check back later.
+
 ## 🚀 Features
 
-- 📱 Run a PocketMine-MP server on your Android device
-- 🧩 Multi-version support
-- 🤖 Compatible with Android 5 and newer
-- 🎮 Host a Minecraft Bedrock server
-
-## 📥 Download
-
-Visit the [Releases page](https://github.com/EXBYPIXEL/Android-PacketMinePm-Panel/releases) for available versions and APKs. If no release is available yet, check back later.
+- 📱 Run a PocketMine-MP server and host a Minecraft Bedrock world directly on your Android device
+- 🤖 Supports Android 5 and newer, including recent Android versions
+- 🧩 Choose from supported server versions
+- 🧪 Test plugins on your phone with the built-in tools, including fake-player testing
+- 🛠️ Compile or decompile your own plugins with the tools
+- 👩‍💻 A simple, approachable interface designed with developers in mind
+- 🌐 You may be able to let friends join over the internet by configuring public access to your server. This depends on your network, router, and hosting provider; a public IP or port forwarding may be required.
 
 ## 🛠️ Getting Started
 
-1. Download a published app version from **Releases** and install it on your Android device.
+1. Open **[Releases](https://github.com/EXBYPIXEL/Android-PacketMinePm-Panel/releases)**, download an available app version, and install it on your Android device.
 2. Select the version you want in the panel.
 3. Start the server. Check your device's network settings and connection address so other players can join.
 
