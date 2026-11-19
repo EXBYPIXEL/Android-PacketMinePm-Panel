@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">PM Panel</string>
+    <string name="notif_channel_name">PocketMine Server</string>
+    <string name="notif_channel_desc">Shows the state of the PocketMine server</string>
+    <string name="notif_title_running">PocketMine server is running</string>
+    <string name="notif_title_stopped">PocketMine server stopped</string>
+    <string name="notif_action_stop">Stop server</string>
+    <string name="notif_action_open">Open panel</string>
+</resources>

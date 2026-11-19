@@ -1,0 +1,10 @@
+{
+  "name": "NG-PocketMine-MP",
+  "ngVersion": "5.51.2",
+  "ngCommit": "eaa2e58156e71e7a10093cffc98b02e1023f05ee",
+  "phpVersion": "PHP 8.4.16 (ZTS) static arm64",
+  "mcSupport": "Bedrock 1.20.0 - 1.26.60",
+  "builtAt": "2026-11-16",
+  "pharSha256": "ae89c77e378de5c3e57366a9131e88c051e9536c445241ffa54f715e99107f22",
+  "notes": "Built from NetherGamesMC/PocketMine-MP stable branch (LGPL-3.0)"
+}

@@ -1,0 +1,3 @@
+# Copy this file to local.properties and point sdk.dir at your Android SDK.
+# (local.properties is machine-specific and is git-ignored)
+sdk.dir=/path/to/Android/Sdk

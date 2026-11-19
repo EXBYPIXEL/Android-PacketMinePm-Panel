@@ -1,0 +1,544 @@
+package com.pmpanel.app;
+
+import android.app.ActivityManager;
+import android.content.Context;
+import android.content.SharedPreferences;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+
+/** First-run setup, php.ini management, and GitHub update checks. */
+public class Installer {
+
+    public static File serverDir(Context ctx) {
+        return serverDir(ctx, Profiles.DEFAULT_ID);
+    }
+
+    /** Per-profile server directory (v2.4 multi-server). */
+    public static File serverDir(Context ctx, String profileId) {
+        return Profiles.dirOf(ctx, profileId);
+    }
+
+    public static File logsDir(Context ctx) {
+        return new File(serverDir(ctx), "logs");
+    }
+
+    public static File cacheTmp(Context ctx) {
+        File base = ctx.getExternalCacheDir();
+        if (base == null) base = ctx.getCacheDir();
+        return new File(base, "pmtmp");
+    }
+
+    /** Staging area parent for the zip importer (survives as a sibling of pmtmp). */
+    public static File cacheTmpStageBase() {
+        Context appCtx = MainApp.ctxOrNull();
+        File base = null;
+        if (appCtx != null) {
+            base = appCtx.getExternalCacheDir();
+            if (base == null) base = appCtx.getCacheDir();
+        }
+        return new File(base, "import-stage");
+    }
+
+    public static File backupsDir(Context ctx) {
+        return new File(serverDir(ctx), "backups");
+    }
+
+    /** Backups folder of a specific profile directory. */
+    public static File backupsDir(File dir) {
+        return new File(dir, "backups");
+    }
+
+    public static synchronized void ensure(Context ctx) throws IOException {
+        ensure(ctx, serverDir(ctx));
+    }
+
+    /** First-run setup for any server directory (default profile or new ones). */
+    public static synchronized void ensure(Context ctx, File dir) throws IOException {
+        File phar = new File(dir, "PocketMine-MP.phar");
+        // Give a CLEAR error early when storage is nearly full instead of failing
+        // mid-copy with a confusing message (a very common cause of failure on
+        // other people's phones). First setup needs room for the bundled phar;
+        // later starts only need room for logs and world saves.
+        long minFree = phar.isFile() ? 30L * 1024 * 1024 : 250L * 1024 * 1024;
+        if (dir.getUsableSpace() < minFree) {
+            throw new IOException("not enough free storage (need about "
+                    + (minFree / (1024 * 1024)) + " MB)");
+        }
+        //noinspection ResultOfMethodCallIgnored
+        new File(dir, "plugins").mkdirs();
+        //noinspection ResultOfMethodCallIgnored
+        new File(dir, "logs").mkdirs();
+        //noinspection ResultOfMethodCallIgnored
+        cacheTmp(ctx).mkdirs();
+        //noinspection ResultOfMethodCallIgnored
+        backupsDir(dir).mkdirs();
+
+        if (!phar.isFile()) copyAsset(ctx, "PocketMine-MP.phar", phar);
+
+        File pmYml = new File(dir, "pocketmine.yml");
+        if (!pmYml.isFile()) copyAsset(ctx, "pocketmine.yml", pmYml);
+
+        File ini = new File(dir, "php.ini");
+        if (!ini.isFile()) writePhpIni(ctx, dir, getMemoryLimitMb(ctx));
+    }
+
+    /**
+     * Set up a freshly created profile directory: bundle + php.ini + a complete
+     * server.properties with a UDP port that no other profile uses (two servers
+     * on the same port would make the second one crash at boot).
+     */
+    public static synchronized void ensureNewProfile(Context ctx, File dir, String name)
+            throws IOException {
+        ensure(ctx, dir);
+        writeFreshProperties(ctx, dir, name);
+    }
+
+    /**
+     * Guarantee the server directory HAS a usable server.properties with a
+     * unique port. The legacy default profile could be started without one
+     * (PocketMine would then fall back to port 19132 and collide with any
+     * other server created afterwards) - this closes that hole.
+     */
+    public static synchronized void ensureServerProperties(Context ctx, File dir) throws IOException {
+        File f = new File(dir, "server.properties");
+        if (f.isFile()) {
+            int port = Profiles.readPort(dir);
+            if (port > 0 && port < 65536) return; // valid user file - keep it untouched
+        }
+        writeFreshProperties(ctx, dir, "PM Panel Server");
+    }
+
+    private static void writeFreshProperties(Context ctx, File dir, String name) throws IOException {
+        int port = Profiles.nextFreePort(ctx);
+        StringBuilder sb = new StringBuilder();
+        sb.append("#Generated by PM Panel\n");
+        sb.append("motd=").append(name.replace('\n', ' ')).append('\n');
+        sb.append("server-port=").append(port).append('\n');
+        sb.append("server-portv6=").append(port + 1).append('\n');
+        sb.append("enable-ipv6=off\n");
+        sb.append("max-players=20\n");
+        sb.append("white-list=off\n");
+        sb.append("gamemode=SURVIVAL\n");
+        sb.append("force-gamemode=off\n");
+        sb.append("hardcore=off\n");
+        sb.append("pvp=on\n");
+        sb.append("difficulty=2\n");
+        sb.append("generator-settings=\n");
+        sb.append("level-name=world\n");
+        sb.append("level-seed=\n");
+        sb.append("level-type=DEFAULT\n");
+        sb.append("enable-query=on\n");
+        sb.append("auto-save=on\n");
+        sb.append("view-distance=10\n");
+        sb.append("xbox-auth=on\n");
+        sb.append("language=eng\n");
+        writeTextFile(new File(dir, "server.properties"), sb.toString());
+    }
+
+    /** Patch just server-port / server-portv6 inside an existing server.properties. */
+    public static synchronized void setServerPort(File dir, int port) throws IOException {
+        File f = new File(dir, "server.properties");
+        java.util.List<String> lines = f.isFile()
+                ? java.nio.file.Files.readAllLines(f.toPath(), java.nio.charset.StandardCharsets.UTF_8)
+                : new java.util.ArrayList<>();
+        StringBuilder sb = new StringBuilder();
+        boolean p1 = false, p2 = false;
+        for (String line : lines) {
+            if (line.startsWith("server-port=")) {
+                sb.append("server-port=").append(port).append('\n');
+                p1 = true;
+            } else if (line.startsWith("server-portv6=")) {
+                sb.append("server-portv6=").append(port + 1).append('\n');
+                p2 = true;
+            } else {
+                sb.append(line).append('\n');
+            }
+        }
+        if (!p1) sb.append("server-port=").append(port).append('\n');
+        if (!p2) sb.append("server-portv6=").append(port + 1).append('\n');
+        writeTextFile(f, sb.toString());
+    }
+
+    private static void writeTextFile(File f, String content) throws IOException {
+        File tmp = new File(f.getParentFile(), f.getName() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
+            out.write(content.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            out.getFD().sync();
+        }
+        if (f.exists()) //noinspection ResultOfMethodCallIgnored
+            f.delete();
+        if (!tmp.renameTo(f)) throw new IOException("cannot write " + f.getName());
+    }
+
+    public static void copyAsset(Context ctx, String asset, File dest) throws IOException {
+        File tmp = new File(dest.getParentFile(), dest.getName() + ".tmp");
+        try (InputStream in = ctx.getAssets().open(asset);
+             OutputStream out = new FileOutputStream(tmp)) {
+            byte[] buf = new byte[65536];
+            int r;
+            while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+            out.flush();
+        }
+        if (dest.exists()) //noinspection ResultOfMethodCallIgnored
+            dest.delete();
+        if (!tmp.renameTo(dest)) throw new IOException("cannot install " + asset);
+    }
+
+    /**
+     * Extract a gzip-compressed asset (used to unpack the 64-bit PHP binary on
+     * devices whose primary ABI is 32-bit but whose CPU is 64-bit capable).
+     */
+    public static void extractGzipAsset(Context ctx, String asset, File dest) throws IOException {
+        File tmp = new File(dest.getParentFile(), dest.getName() + ".tmp");
+        try (java.util.zip.GZIPInputStream in = new java.util.zip.GZIPInputStream(ctx.getAssets().open(asset));
+             FileOutputStream out = new FileOutputStream(tmp)) {
+            byte[] buf = new byte[65536];
+            int r;
+            while ((r = in.read(buf)) > 0) out.write(buf, 0, r);
+            out.flush();
+            out.getFD().sync();
+        }
+        if (dest.exists()) //noinspection ResultOfMethodCallIgnored
+            dest.delete();
+        if (!tmp.renameTo(dest)) throw new IOException("cannot extract " + asset);
+        //noinspection ResultOfMethodCallIgnored
+        dest.setExecutable(true, false);
+        //noinspection ResultOfMethodCallIgnored
+        dest.setReadable(true, false);
+        //noinspection ResultOfMethodCallIgnored
+        dest.setWritable(true, false);
+    }
+
+    /**
+     * Read a whole stream as UTF-8 text.
+     * NOTE: `new Scanner(in, Charset)` only exists on Android 14 (API 34)+ and throws
+     * NoSuchMethodError on older phones - that was the exact cause of the
+     * "setup failed: NoSuchMethodError ... java.util.Scanner" reports. InputStreamReader
+     * with a Charset exists since API 1, so this runs on every device.
+     */
+    private static String readAllText(InputStream in) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
+            char[] buf = new char[8192];
+            int n;
+            while ((n = r.read(buf)) > 0) sb.append(buf, 0, n);
+        }
+        return sb.toString();
+    }
+
+    public static String readAssetText(Context ctx, String asset) throws IOException {
+        try (InputStream in = ctx.getAssets().open(asset)) {
+            return readAllText(in);
+        }
+    }
+
+    public static SharedPreferences prefs(Context ctx) {
+        return ctx.getSharedPreferences("pmpanel", Context.MODE_PRIVATE);
+    }
+
+    public static int getMemoryLimitMb(Context ctx) {
+        // Default tuned to the device: small-RAM phones get a smaller PHP limit so
+        // PocketMine does not fight the WebView for memory (a common crash source).
+        long totalRam = 0;
+        try {
+            ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
+            if (am != null) {
+                ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                totalRam = mi.totalMem;
+            }
+        } catch (Throwable ignored) {
+        }
+        int def = (totalRam > 0 && totalRam < 3500L * 1024 * 1024) ? 512 : 1024;
+        return prefs(ctx).getInt("memoryLimitMb", def);
+    }
+
+    /* ---------------- per-server memory limit (v2.5) ----------------
+     * Every profile owns its memory limit: stored under "memLimit_<id>",
+     * applied by patching ONLY the memory_limit line of that server's php.ini
+     * (the rest of the file, e.g. user-edited extension settings, is kept). */
+
+    private static String memKey(String profileId) {
+        return "memLimit_" + (profileId == null ? Profiles.DEFAULT_ID : profileId);
+    }
+
+    public static boolean hasMemoryPref(Context ctx, String profileId) {
+        return prefs(ctx).contains(memKey(profileId));
+    }
+
+    /** Effective limit of one profile: its own setting, else its php.ini, else the app default. */
+    public static int getMemoryLimitMb(Context ctx, String profileId) {
+        String key = memKey(profileId);
+        if (prefs(ctx).contains(key)) return prefs(ctx).getInt(key, 1024);
+        int fromIni = readPhpIniLimit(Profiles.dirOf(ctx, profileId));
+        return fromIni > 0 ? fromIni : getMemoryLimitMb(ctx);
+    }
+
+    /** Store a per-profile limit and write it into that profile's php.ini. */
+    public static synchronized void setMemoryLimit(Context ctx, String profileId, int mb) {
+        prefs(ctx).edit().putInt(memKey(profileId), mb).apply();
+        try {
+            patchMemoryLimit(ctx, Profiles.dirOf(ctx, profileId), mb);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** On start: follow the stored per-profile setting (never touches php.ini when the user never changed it). */
+    public static synchronized void applyProfileMemory(Context ctx, String profileId, File dir) {
+        if (!prefs(ctx).contains(memKey(profileId))) return;
+        try {
+            patchMemoryLimit(ctx, dir, getMemoryLimitMb(ctx, profileId));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** memory_limit value inside dir/php.ini (0 when missing/unparseable). */
+    public static int readPhpIniLimit(File dir) {
+        try {
+            File f = new File(dir, "php.ini");
+            if (!f.isFile()) return 0;
+            for (String line : java.nio.file.Files.readAllLines(f.toPath(), java.nio.charset.StandardCharsets.UTF_8)) {
+                String t = line.trim();
+                if (t.startsWith("memory_limit=")) {
+                    String v = t.substring(13).trim().toLowerCase(Locale.US);
+                    int mult = 1;
+                    if (v.endsWith("m")) { mult = 1; v = v.substring(0, v.length() - 1); }
+                    else if (v.endsWith("g")) { mult = 1024; v = v.substring(0, v.length() - 1); }
+                    v = v.trim();
+                    int n = Integer.parseInt(v);
+                    if (n > 0) return n * mult;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return 0;
+    }
+
+    /** Replace ONLY the memory_limit line inside an existing php.ini (template when the file is missing). */
+    public static synchronized void patchMemoryLimit(Context ctx, File dir, int mb) throws IOException {
+        File ini = new File(dir, "php.ini");
+        String content;
+        if (ini.isFile()) {
+            StringBuilder sb = new StringBuilder();
+            try (FileInputStream in = new FileInputStream(ini);
+                 java.io.InputStreamReader r = new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8);
+                 java.io.BufferedReader br = new java.io.BufferedReader(r)) {
+                char[] buf = new char[8192];
+                int n;
+                while ((n = br.read(buf)) > 0) sb.append(buf, 0, n);
+            }
+            content = sb.toString();
+        } else {
+            content = readAssetText(ctx, "php.ini");
+        }
+        if (content.contains("memory_limit=")) {
+            content = content.replaceAll("memory_limit=\\S+", "memory_limit=" + mb + "M");
+        } else {
+            content = "memory_limit=" + mb + "M\n" + content;
+        }
+        writeTextFile(ini, content);
+    }
+
+    /** (Re)write php.ini from the asset template with the given memory limit (fresh servers only). */
+    public static synchronized void writePhpIni(Context ctx, File dir, int memMb) throws IOException {
+        String template = readAssetText(ctx, "php.ini");
+        String content;
+        if (template.contains("memory_limit=")) {
+            content = template.replaceAll("memory_limit=\\S+", "memory_limit=" + memMb + "M");
+        } else {
+            content = "memory_limit=" + memMb + "M\n" + template;
+        }
+        writeTextFile(new File(dir, "php.ini"), content);
+    }
+
+    public static JSONObject bundleInfo(Context ctx) {
+        try {
+            return new JSONObject(readAssetText(ctx, "bundle-info.json"));
+        } catch (Exception e) {
+            return ServerManager.JO("error", Bridge.safeMsg(e));
+        }
+    }
+
+    /** Swap in a new server phar (keeps one .bak of the previous one) - default profile. */
+    public static void applyPhar(Context ctx, File newPhar) throws IOException {
+        applyPhar(ctx, serverDir(ctx), newPhar);
+    }
+
+    /** Swap in a new server phar inside the given server directory. */
+    public static void applyPhar(Context ctx, File dir, File newPhar) throws IOException {
+        File phar = new File(dir, "PocketMine-MP.phar");
+        File bak = new File(dir, "PocketMine-MP.phar.bak");
+        //noinspection ResultOfMethodCallIgnored
+        bak.delete();
+        if (phar.exists() && !phar.renameTo(bak)) throw new IOException("cannot backup current phar");
+        File target = new File(dir, "PocketMine-MP.phar");
+        if (!newPhar.renameTo(target)) throw new IOException("cannot move new phar");
+    }
+
+    public interface ProgressListener {
+        void onProgress(int percent);
+    }
+
+    /** Progress in raw bytes (used by the generic downloader). */
+    public interface ByteProgressListener {
+        void onProgress(long done, long total);
+    }
+
+    /** Download a file with percent progress callbacks. */
+    public static void downloadFile(String urlStr, File dest, ProgressListener listener) throws IOException {
+        downloadFile(urlStr, dest, (done, total) -> {
+            if (listener != null && total > 0) listener.onProgress((int) (done * 100 / total));
+        });
+        if (listener != null) listener.onProgress(100);
+    }
+
+    /** Download a file with byte-level progress callbacks (total<0 when unknown). */
+    public static void downloadFile(String urlStr, File dest, ByteProgressListener listener) throws IOException {
+        File tmp = new File(dest.getParentFile(), dest.getName() + ".part");
+        //noinspection ResultOfMethodCallIgnored
+        tmp.getParentFile().mkdirs();
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        conn.setInstanceFollowRedirects(true);
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(30000);
+        conn.setRequestProperty("User-Agent", "PMPanel-Android");
+        try {
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) throw new IOException("HTTP " + code);
+            long total = conn.getContentLengthLong();
+            try (InputStream in = conn.getInputStream();
+                 OutputStream out = new FileOutputStream(tmp)) {
+                byte[] buf = new byte[65536];
+                long done = 0;
+                long last = 0;
+                int r;
+                while ((r = in.read(buf)) > 0) {
+                    out.write(buf, 0, r);
+                    done += r;
+                    if (listener != null && (done - last >= 262144 || done == total)) {
+                        listener.onProgress(done, total);
+                        last = done;
+                    }
+                }
+                out.flush();
+            }
+        } finally {
+            conn.disconnect();
+        }
+        if (dest.exists()) //noinspection ResultOfMethodCallIgnored
+            dest.delete();
+        if (!tmp.renameTo(dest)) throw new IOException("cannot finalize download");
+        if (listener != null) listener.onProgress(dest.length(), dest.length());
+    }
+
+    private static String ghGet(String url) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setInstanceFollowRedirects(true);
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(30000);
+        conn.setRequestProperty("User-Agent", "PMPanel-Android");
+        conn.setRequestProperty("Accept", "application/vnd.github+json");
+        try {
+            int code = conn.getResponseCode();
+            if (code != 200) throw new IOException("HTTP " + code);
+            try (InputStream in = conn.getInputStream()) {
+                return readAllText(in);
+            }
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static void put(JSONObject o, String k, Object v) {
+        try {
+            o.put(k, v);
+        } catch (JSONException ignored) {
+        }
+    }
+
+    /** Check for updates: official pmmp release, community NG-phar builds, NG source commit. */
+    public static JSONObject checkUpdates(Context ctx) {
+        JSONObject res = ServerManager.JO("ok", true);
+
+        // Official pmmp latest release
+        try {
+            JSONObject rel = new JSONObject(ghGet("https://api.github.com/repos/pmmp/PocketMine-MP/releases/latest"));
+            JSONObject o = new JSONObject();
+            o.put("tag", rel.optString("tag_name"));
+            o.put("date", rel.optString("published_at"));
+            JSONArray assets = rel.optJSONArray("assets");
+            if (assets != null) {
+                for (int i = 0; i < assets.length(); i++) {
+                    JSONObject a = assets.optJSONObject(i);
+                    if (a != null && "PocketMine-MP.phar".equals(a.optString("name"))) {
+                        o.put("url", a.optString("browser_download_url"));
+                        o.put("size", a.optLong("size"));
+                    }
+                }
+            }
+            res.put("pmmp", o);
+        } catch (Exception e) {
+            put(res, "pmmp", ServerManager.JO("error", Bridge.safeMsg(e)));
+        }
+
+        // Community NG phar builds (TheWindows)
+        try {
+            JSONArray rels = new JSONArray(ghGet("https://api.github.com/repos/TheWindows/PocketMine-NG-Builds-phar/releases?per_page=15"));
+            JSONObject found = null;
+            for (int i = 0; i < rels.length() && found == null; i++) {
+                JSONObject rel = rels.optJSONObject(i);
+                if (rel == null) continue;
+                JSONArray assets = rel.optJSONArray("assets");
+                if (assets == null) continue;
+                for (int j = 0; j < assets.length(); j++) {
+                    JSONObject a = assets.optJSONObject(j);
+                    if (a != null && a.optString("name").toLowerCase().endsWith(".phar")) {
+                        found = new JSONObject();
+                        found.put("tag", rel.optString("tag_name"));
+                        found.put("date", rel.optString("published_at"));
+                        found.put("url", a.optString("browser_download_url"));
+                        found.put("asset", a.optString("name"));
+                        found.put("size", a.optLong("size"));
+                        break;
+                    }
+                }
+            }
+            if (found == null) found = new JSONObject().put("error", "no phar assets found");
+            res.put("ngBuilds", found);
+        } catch (Exception e) {
+            put(res, "ngBuilds", ServerManager.JO("error", Bridge.safeMsg(e)));
+        }
+
+        // NG source latest stable commit
+        try {
+            JSONObject c = new JSONObject(ghGet("https://api.github.com/repos/NetherGamesMC/PocketMine-MP/commits/stable"));
+            JSONObject o = new JSONObject();
+            o.put("sha", c.optString("sha"));
+            JSONObject commit = c.optJSONObject("commit");
+            if (commit != null) o.put("date", commit.optJSONObject("committer") != null
+                    ? commit.getJSONObject("committer").optString("date") : "");
+            o.put("bundledSha", bundleInfo(ctx).optString("ngCommit", ""));
+            o.put("message", commit != null ? commit.optString("message", "") : "");
+            res.put("ngSource", o);
+        } catch (Exception e) {
+            put(res, "ngSource", ServerManager.JO("error", Bridge.safeMsg(e)));
+        }
+        return res;
+    }
+}

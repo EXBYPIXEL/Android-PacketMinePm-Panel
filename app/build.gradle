@@ -1,0 +1,64 @@
+// The release keystore is NOT in this repository (see .gitignore).
+// If you have your own keystore at keystore/pmpanel.keystore it is used
+// automatically; otherwise release builds come out UNSIGNED
+// (app-release-unsigned.apk) and debug builds are signed with the debug key.
+def keystoreFile = file('../keystore/pmpanel.keystore')
+def hasReleaseKeystore = keystoreFile.exists()
+
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.pmpanel.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.pmpanel.app"
+        minSdk 21
+        targetSdk 34
+        versionCode 21
+        versionName "2.8.0"
+    }
+
+    signingConfigs {
+        release {
+            if (hasReleaseKeystore) {
+                storeFile keystoreFile
+                storePassword 'pmpanel-2026-release'
+                keyAlias 'pmpanel'
+                keyPassword 'pmpanel-2026-release'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+    }
+}

@@ -1,0 +1,22 @@
+# Build outputs
+build/
+app/build/
+*.apk
+
+# Gradle
+.gradle/
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store
+
+# Machine-specific SDK path (copy local.properties.example instead)
+local.properties
+
+# Signing key — NEVER publish your release keystore.
+# If you fork this project, generate your own keystore, otherwise
+# anyone can sign malicious updates that install over your app.
+keystore/
+*.keystore
+*.jks
